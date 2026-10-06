@@ -112,6 +112,9 @@ public static class AvaloniaAppHost
         Logger.ImportantInfo($"Process arch: {RuntimeInformation.ProcessArchitecture} (OS: {RuntimeInformation.OSArchitecture})");
         Logger.ImportantInfo($"Runtime: {RuntimeInformation.FrameworkDescription}");
         Logger.ImportantInfo($"UI font: {UiFontPolicy.ResolveDefaultFamilyName() ?? "(platform default)"}");
+        Logger.ImportantInfo($"UI font fallbacks: {(UiFontPolicy.ResolveFontFallbacks() is { } fallbacks
+            ? string.Join(", ", fallbacks.Select(f => f.FontFamily.Name))
+            : "(none)")}");
         Logger.ImportantInfo($"Elevated: {CoreTools.IsAdministrator()}");
         Logger.ImportantInfo($"Packaged (MSIX): {CoreTools.IsPackagedApp()}");
         Logger.ImportantInfo($"Args: {(args.Length > 0 ? string.Join(" ", args) : "(none)")}");
@@ -131,19 +134,32 @@ public static class AvaloniaAppHost
         BuildAvaloniaApp().StartWithClassicDesktopLifetime(args);
     }
 
+    /// <summary>
+    /// Builds the font options the app builder is configured with, so the policy's output and the
+    /// options it is carried in can be exercised without standing up Avalonia.
+    /// </summary>
+    public static FontManagerOptions BuildFontManagerOptions()
+        => new()
+        {
+            DefaultFamilyName = UiFontPolicy.ResolveDefaultFamilyName(),
+            FontFallbacks = UiFontPolicy.ResolveFontFallbacks(),
+        };
+
     public static AppBuilder BuildAvaloniaApp()
     {
         AppBuilder builder = AppBuilder.Configure<App>()
             .UsePlatformDetect();
 
-        if (UiFontPolicy.ResolveDefaultFamilyName() is { } fontFamily)
-        {
-            if (UiFontPolicy.RequiresBundledFont(fontFamily))
-            {
-                builder = builder.WithInterFont();
-            }
+        FontManagerOptions fontOptions = BuildFontManagerOptions();
 
-            builder = builder.With(new FontManagerOptions { DefaultFamilyName = fontFamily });
+        if (fontOptions.DefaultFamilyName is { } fontFamily && UiFontPolicy.RequiresBundledFont(fontFamily))
+        {
+            builder = builder.WithInterFont();
+        }
+
+        if (fontOptions.DefaultFamilyName is not null || fontOptions.FontFallbacks is not null)
+        {
+            builder = builder.With(fontOptions);
         }
 
 #if WINDOWS
