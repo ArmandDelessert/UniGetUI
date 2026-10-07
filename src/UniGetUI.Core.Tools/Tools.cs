@@ -900,7 +900,17 @@ namespace UniGetUI.Core.Tools
             try
             {
                 if (isSessionCache && _uacCacheHeld)
-                    return;
+                {
+                    if (await ProbeElevationCacheAsync() is not ElevationCacheState.Unavailable)
+                        return;
+
+                    Logger.Warn(
+                        "The administrator rights cache is no longer reachable, it will be requested again"
+                    );
+                    _uacCacheHeld = false;
+                    _elevationCacheWaitTimedOut = false;
+                    Interlocked.Increment(ref _uacCacheGeneration);
+                }
 
                 Logger.Info("Caching admin rights for process id " + Environment.ProcessId);
 
@@ -947,7 +957,31 @@ namespace UniGetUI.Core.Tools
                     )
                     .Trim();
 
-                if (p.ExitCode == 0)
+                if (p.ExitCode != 0)
+                {
+                    _uacCacheHeld = false;
+                    Logger.Error(
+                        $"The elevator could not cache administrator rights (exit code {p.ExitCode}). "
+                            + "Every operation that requires elevation will ask for consent separately."
+                    );
+                    if (output.Length > 0)
+                        Logger.Error(output);
+                }
+                else if (
+                    isSessionCache
+                    && await WaitForElevationCacheAsync() is ElevationCacheState.Unavailable
+                )
+                {
+                    _uacCacheHeld = false;
+                    Logger.Error(
+                        "The elevator reported success but no administrator rights cache became "
+                            + $"reachable for process id {Environment.ProcessId}. Every operation "
+                            + "that requires elevation will ask for consent separately."
+                    );
+                    if (output.Length > 0)
+                        Logger.Error(output);
+                }
+                else
                 {
                     _uacCacheHeld = true;
                     Interlocked.Increment(ref _uacCacheGeneration);
@@ -957,15 +991,6 @@ namespace UniGetUI.Core.Tools
                     );
                     if (output.Length > 0)
                         Logger.Info(output);
-                }
-                else
-                {
-                    Logger.Error(
-                        $"The elevator could not cache administrator rights (exit code {p.ExitCode}). "
-                            + "Every operation that requires elevation will ask for consent separately."
-                    );
-                    if (output.Length > 0)
-                        Logger.Error(output);
                 }
             }
             catch (Exception ex)
@@ -979,6 +1004,133 @@ namespace UniGetUI.Core.Tools
             }
         }
 
+        private enum ElevationCacheState
+        {
+            Available,
+            Unavailable,
+            Unknown,
+        }
+
+        private static bool _elevationCacheProbeUnsupported;
+
+        private static bool _elevationCacheProbeFailureLogged;
+
+        private static bool _elevationCacheWaitTimedOut;
+
+        private static async Task<ElevationCacheState> WaitForElevationCacheAsync()
+        {
+            ElevationCacheState state = await ProbeElevationCacheAsync();
+
+            if (_elevationCacheWaitTimedOut)
+                return state;
+
+            int[] retryDelays = [250, 500, 1000, 2000, 4000];
+
+            foreach (int delay in retryDelays)
+            {
+                if (state is not ElevationCacheState.Unavailable)
+                    return state;
+
+                await Task.Delay(delay);
+                state = await ProbeElevationCacheAsync();
+            }
+
+            _elevationCacheWaitTimedOut = state is ElevationCacheState.Unavailable;
+            return state;
+        }
+
+        private static async Task<ElevationCacheState> ProbeElevationCacheAsync()
+        {
+            if (
+                !OperatingSystem.IsWindows()
+                || _elevationCacheProbeUnsupported
+                || CoreData.ElevatorPath.Length is 0
+            )
+                return ElevationCacheState.Unknown;
+
+            try
+            {
+                using Process p = new()
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = CoreData.ElevatorPath,
+                        Arguments = "status CacheAvailable",
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        RedirectStandardInput = true,
+                        CreateNoWindow = true,
+                        StandardOutputEncoding = Encoding.UTF8,
+                        StandardErrorEncoding = Encoding.UTF8,
+                    },
+                };
+
+                p.Start();
+                p.StandardInput.Close();
+
+                Task<string> stdout = p.StandardOutput.ReadToEndAsync();
+                Task<string> stderr = p.StandardError.ReadToEndAsync();
+                Task reads = Task.WhenAll(stdout, stderr);
+                _ = reads.ContinueWith(
+                    completed => _ = completed.Exception,
+                    CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted,
+                    TaskScheduler.Default
+                );
+
+                using CancellationTokenSource cts = new(TimeSpan.FromSeconds(5));
+                try
+                {
+                    await p.WaitForExitAsync(cts.Token);
+                    await reads.WaitAsync(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    try
+                    {
+                        p.Kill(entireProcessTree: true);
+                    }
+                    catch (Exception killEx)
+                        when (killEx is InvalidOperationException or NotSupportedException)
+                    {
+                        Logger.Debug(killEx);
+                    }
+
+                    Logger.Warn("The elevator did not report the administrator rights cache status");
+                    return ElevationCacheState.Unknown;
+                }
+
+                if (bool.TryParse(stdout.Result.Trim(), out bool available))
+                    return available
+                        ? ElevationCacheState.Available
+                        : ElevationCacheState.Unavailable;
+
+                string error = stderr.Result.Trim();
+
+                if (error.Contains("not a valid Status Key", StringComparison.OrdinalIgnoreCase))
+                    _elevationCacheProbeUnsupported = true;
+
+                if (!_elevationCacheProbeFailureLogged)
+                {
+                    _elevationCacheProbeFailureLogged = true;
+                    Logger.Warn(
+                        $"The elevator did not report the administrator rights cache status (exit code {p.ExitCode})"
+                    );
+                    if (error.Length > 0)
+                        Logger.Warn(error);
+                }
+
+                return ElevationCacheState.Unknown;
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn("Failed to read the administrator rights cache status");
+                Logger.Warn(ex);
+                return ElevationCacheState.Unknown;
+            }
+        }
+
         /// <summary>
         /// Forgets that an elevation cache is held, without releasing it. The next operation
         /// that needs elevation will ask the elevator again; that request is free and silent
@@ -989,6 +1141,8 @@ namespace UniGetUI.Core.Tools
             await _uacCacheLock.WaitAsync();
             try
             {
+                _elevationCacheWaitTimedOut = false;
+
                 if (expectedGeneration is long expected
                     && (expected != _uacCacheGeneration || !_uacCacheHeld))
                     return false;
@@ -1033,6 +1187,8 @@ namespace UniGetUI.Core.Tools
             await _uacCacheLock.WaitAsync();
             try
             {
+                _elevationCacheWaitTimedOut = false;
+
                 if (expectedGeneration is long expected
                     && (expected != _uacCacheGeneration || !_uacCacheHeld))
                     return false;
