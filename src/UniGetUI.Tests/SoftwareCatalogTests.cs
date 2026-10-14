@@ -5,11 +5,29 @@ using UniGetUI.Avalonia.ViewModels.Pages;
 using UniGetUI.Avalonia.Views;
 using UniGetUI.Core.Data;
 using UniGetUI.Interface;
+using CoreSettings = UniGetUI.Core.SettingsEngine.Settings;
 
 namespace UniGetUI.Tests;
 
-public class SoftwareCatalogTests
+public sealed class SoftwareCatalogTests : IDisposable
 {
+    // The catalog saves its view and sort, so keep that away from the real settings.
+    private readonly string _testRoot = Path.Combine(Path.GetTempPath(), nameof(SoftwareCatalogTests), Guid.NewGuid().ToString("N"));
+
+    public SoftwareCatalogTests()
+    {
+        CoreData.TEST_DataDirectoryOverride = Path.Combine(_testRoot, "Data");
+        Directory.CreateDirectory(CoreData.UniGetUIUserConfigurationDirectory);
+        CoreSettings.ResetSettings();
+    }
+
+    public void Dispose()
+    {
+        CoreSettings.ResetSettings();
+        CoreData.TEST_DataDirectoryOverride = null;
+        Directory.Delete(_testRoot, recursive: true);
+    }
+
     [Theory]
     [InlineData("clAuDe")]
     [InlineData("Anthropic.")]
@@ -48,7 +66,7 @@ public class SoftwareCatalogTests
     }
 
     [Fact]
-    public void CatalogDefaultsToTilesAndViewSwitchingPreservesPackagesAndFilters()
+    public void CatalogDefaultsToIconsAndViewSwitchingPreservesPackagesAndFilters()
     {
         var vm = new SoftwareCatalogViewModel
         {
@@ -56,9 +74,9 @@ public class SoftwareCatalogTests
             Query = "Claude",
         };
         vm.LoadCatalogs([new CatalogDefinition { Id = "test", Name = "Test", Packages = [Entry] }]);
-        Assert.Equal(3, vm.ViewModeIndex);
+        Assert.Equal(2, vm.ViewModeIndex);
         Assert.False(vm.IsFilterPaneOpen);
-        Assert.True(vm.IsTilesView);
+        Assert.True(vm.IsIconsView);
         var tile = Assert.Single(vm.Packages);
         for (int index = 0; index < 4; index++)
         {
@@ -71,6 +89,52 @@ public class SoftwareCatalogTests
             Assert.Equal("Claude", vm.Query);
             Assert.False(vm.HideUnavailablePackages);
         }
+    }
+
+    [Fact]
+    public void PinnedVersionIsShownOnTheTileAndUnpinnedEntriesShowNone()
+    {
+        var pinned = new CatalogTileViewModel(new CatalogEntry
+        {
+            Id = "is-number",
+            Name = "Is Number",
+            Version = "6.0.0",
+            Source = "npm",
+            ManagerName = "Npm",
+        });
+        Assert.True(pinned.HasPinnedVersion);
+        Assert.Equal("Version 6.0.0", pinned.PinnedVersionText);
+        Assert.Contains("Version 6.0.0", pinned.ToolTipText);
+
+        var latest = new CatalogTileViewModel(new CatalogEntry
+        {
+            Id = "is-number",
+            Name = "Is Number",
+            Source = "npm",
+            ManagerName = "Npm",
+        });
+        Assert.False(latest.HasPinnedVersion);
+        Assert.Equal("", latest.PinnedVersionText);
+        Assert.DoesNotContain("Version", latest.ToolTipText);
+    }
+
+    [Fact]
+    public void ViewModeAndSortAreRestoredByTheNextCatalog()
+    {
+        var first = new SoftwareCatalogViewModel { ViewModeIndex = 0 };
+        first.ToggleSort(CatalogSortField.Source);
+        first.ToggleSort(CatalogSortField.Source);
+        Assert.False(first.SortAscending);
+
+        var restored = new SoftwareCatalogViewModel();
+        Assert.Equal(0, restored.ViewModeIndex);
+        Assert.Equal(CatalogSortField.Source, restored.SortField);
+        Assert.False(restored.SortAscending);
+
+        restored.ToggleSort(CatalogSortField.Id);
+        var afterHeaderClick = new SoftwareCatalogViewModel();
+        Assert.Equal(CatalogSortField.Id, afterHeaderClick.SortField);
+        Assert.True(afterHeaderClick.SortAscending);
     }
 
     private const string EntryJson = """
@@ -624,17 +688,50 @@ public class SoftwareCatalogTests
         Assert.True(tile.CanInstall);
     }
 
+    [Fact]
+    public void NumberShortcutsFollowTheSidebarOrder()
+    {
+        Assert.Equal(
+            [PageType.Catalog, PageType.Discover, PageType.Updates, PageType.Installed, PageType.Bundles,
+                PageType.CatalogEditor, PageType.Settings, PageType.Managers],
+            MainWindowViewModel.GetShortcutPages(true));
+        Assert.Equal(
+            [PageType.Discover, PageType.Updates, PageType.Installed, PageType.Bundles, PageType.Settings, PageType.Managers],
+            MainWindowViewModel.GetShortcutPages(false));
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public void CatalogParticipatesInKeyboardPageCycleOnlyWhenEnabled(bool enabled)
+    public void KeyboardPageCycleFollowsTheSidebarOrderInBothDirections(bool catalogEnabled)
     {
-        Assert.Equal(enabled ? PageType.Catalog : PageType.Settings, MainWindowViewModel.GetNextPage(PageType.Bundles, enabled));
-        Assert.Equal(enabled ? PageType.CatalogEditor : PageType.Settings, MainWindowViewModel.GetNextPage(PageType.Catalog, enabled));
-        Assert.Equal(PageType.Settings, MainWindowViewModel.GetNextPage(PageType.CatalogEditor, enabled));
-        Assert.Equal(enabled ? PageType.CatalogEditor : PageType.Bundles, MainWindowViewModel.GetPreviousPage(PageType.Settings, enabled));
-        Assert.Equal(enabled ? PageType.Catalog : PageType.Bundles, MainWindowViewModel.GetPreviousPage(PageType.CatalogEditor, enabled));
-        Assert.Equal(PageType.Bundles, MainWindowViewModel.GetPreviousPage(PageType.Catalog));
+        var pages = MainWindowViewModel.GetShortcutPages(catalogEnabled);
+        for (int i = 0; i < pages.Length; i++)
+        {
+            var next = pages[(i + 1) % pages.Length];
+            Assert.Equal(next, MainWindowViewModel.GetNextPage(pages[i], catalogEnabled));
+            Assert.Equal(pages[i], MainWindowViewModel.GetPreviousPage(next, catalogEnabled));
+        }
+        Assert.Equal(PageType.Discover, MainWindowViewModel.GetNextPage(PageType.OwnLog, catalogEnabled));
+    }
+
+    [Fact]
+    public void OnlyACatalogWithPackagesCountsAsUsable()
+    {
+        string file = Path.Combine(_testRoot, "SoftwareCatalog.json");
+        Assert.False(SoftwareCatalog.HasUsableCatalog(file));
+
+        File.WriteAllText(file, "{ not json");
+        Assert.False(SoftwareCatalog.HasUsableCatalog(file));
+
+        File.WriteAllText(file, """{"version":1,"catalogs":[]}""");
+        Assert.False(SoftwareCatalog.HasUsableCatalog(file));
+
+        File.WriteAllText(file, """{"version":1,"catalogs":[{"id":"a","name":"A","packages":[]}]}""");
+        Assert.False(SoftwareCatalog.HasUsableCatalog(file));
+
+        File.WriteAllText(file, """{"version":1,"catalogs":[{"id":"a","name":"A","packages":[{"Id":"jq","Name":"jq","Version":"","Source":"Homebrew","ManagerName":"Homebrew"}]}]}""");
+        Assert.True(SoftwareCatalog.HasUsableCatalog(file));
     }
 
     [Fact]
