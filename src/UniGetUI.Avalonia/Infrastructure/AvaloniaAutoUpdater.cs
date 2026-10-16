@@ -379,8 +379,39 @@ internal static partial class AvaloniaAutoUpdater
         }
     }
 
+    private static int _activeAttempts;
+    private static int _attemptsAwaitingConsent;
+    private static readonly InstallerHandoffTracker InstallerHandoffs = new();
+    private static readonly TimeSpan InstallerHandoffTimeout = TimeSpan.FromMinutes(2);
+
+    internal static bool IsBusy
+        => Volatile.Read(ref _activeAttempts) > Volatile.Read(ref _attemptsAwaitingConsent);
+
+    internal static async Task WaitForInstallerHandoffAsync()
+    {
+        if (!InstallerHandoffs.HasPending)
+            return;
+
+        LogUpdateInfo("Auto-updater: waiting for the ready update to be handed off before shutting down.");
+        if (!await InstallerHandoffs.WaitForAllAsync(InstallerHandoffTimeout))
+            LogUpdateWarn($"Auto-updater: the ready update was not handed off within {InstallerHandoffTimeout.TotalMinutes:0} minutes, shutting down anyway.");
+    }
+
     // ------------------------------------------------------------------ core logic
     internal static async Task<bool> CheckAndInstallUpdatesAsync(bool autoLaunch = false, bool manualCheck = false)
+    {
+        Interlocked.Increment(ref _activeAttempts);
+        try
+        {
+            return await CheckAndInstallUpdatesCoreAsync(autoLaunch, manualCheck);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _activeAttempts);
+        }
+    }
+
+    private static async Task<bool> CheckAndInstallUpdatesCoreAsync(bool autoLaunch, bool manualCheck)
     {
         ResetUpdateLog(manualCheck, autoLaunch);
         UpdaterOverrides overrides = LoadUpdaterOverrides();
@@ -638,24 +669,40 @@ internal static partial class AvaloniaAutoUpdater
             // On first launch in background we wait for user interaction
         }
 
-        // Wait until user requests install, clicks the toast, or the window is being closed
-        while (!_installRequested && !ReleaseLockForAutoupdate_Window && !ReleaseLockForAutoupdate_Notification)
+        TaskCompletionSource handoff = InstallerHandoffs.Begin();
+        try
         {
-            if (!manualCheck && Settings.Get(Settings.K.DisableAutoUpdateWingetUI))
+            // Wait until user requests install, clicks the toast, or the window is being closed
+            Interlocked.Increment(ref _attemptsAwaitingConsent);
+            try
             {
-                LogUpdateWarn("Auto-updater: disabled while waiting for user \u2014 aborting.");
-                MarkAttemptFinished("aborted - auto-update disabled while waiting");
-                return true;
+                while (!_installRequested && !ReleaseLockForAutoupdate_Window && !ReleaseLockForAutoupdate_Notification)
+                {
+                    if (!manualCheck && Settings.Get(Settings.K.DisableAutoUpdateWingetUI))
+                    {
+                        LogUpdateWarn("Auto-updater: disabled while waiting for user \u2014 aborting.");
+                        MarkAttemptFinished("aborted - auto-update disabled while waiting");
+                        return true;
+                    }
+                    await Task.Delay(500);
+                }
             }
-            await Task.Delay(500);
-        }
+            finally
+            {
+                Interlocked.Decrement(ref _attemptsAwaitingConsent);
+            }
 
-        LogUpdateInfo("Installing update \u2014 launching installer.");
-        await LaunchInstallerAsync(installerPath);
-        return true;
+            LogUpdateInfo("Installing update \u2014 launching installer.");
+            await LaunchInstallerAsync(installerPath, handoff);
+            return true;
+        }
+        finally
+        {
+            InstallerHandoffs.Complete(handoff);
+        }
     }
 
-    private static async Task LaunchInstallerAsync(string installerLocation)
+    private static async Task LaunchInstallerAsync(string installerLocation, TaskCompletionSource handoff)
     {
         if (OperatingSystem.IsMacOS())
         {
@@ -732,6 +779,7 @@ internal static partial class AvaloniaAutoUpdater
         }
 
         LogUpdateInfo($"Installer process started (PID {p.Id}). The installer is expected to terminate UniGetUI before file replacement.");
+        InstallerHandoffs.Complete(handoff);
 
         RaiseStatus(
             CoreTools.Translate("UniGetUI is being updated..."),
