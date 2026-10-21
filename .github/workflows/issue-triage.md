@@ -2,11 +2,12 @@
 description: |
   Triages new UniGetUI issues: labels them by type and priority, flags likely
   duplicates, and asks the author clarifying questions when the report is
-  unclear. Never closes, edits, or removes labels from issues.
+  unclear. Runs once per new issue. Never closes, edits, or removes labels from
+  issues.
 
 on:
   issues:
-    types: [opened, reopened]
+    types: [opened]
   reaction: eyes
   roles: all
   workflow_dispatch:
@@ -54,7 +55,7 @@ safe-outputs:
       - "priority: low"
       - duplicate
       - needs-author-answer
-      - not-UniGetUI
+      - possibly-upstream
       - appearance
       - translations
       - widgets-for-unigetui
@@ -89,8 +90,9 @@ stop without doing anything.
 ## 1. Gather context
 
 1. Read the issue title, body, existing labels, and comments.
-2. Search open and recently closed issues for the same symptom, error message,
-   package, package manager, or feature request.
+2. Always search open and recently closed issues for the same symptom, error
+   message, package, package manager, or feature request, even when the report
+   is short or unclear.
 
 ## 2. Check whether the report is clear enough
 
@@ -103,13 +105,18 @@ If essential details are missing or the description is ambiguous, the issue is
 **unclear**: add `needs-author-answer` and ask only the specific questions
 needed to act on it (at most four). Do not guess a priority for an unclear bug.
 
+Being unclear only holds back the priority. An unclear issue still goes through
+every remaining step: it still gets a type label in step 3 and a duplicate
+check in step 4.
+
 ## 3. Label type and priority
 
 **Type**: issue templates already add `bug` or `enhancement`. Keep an existing
 type label unless the content clearly contradicts it, and never add a second
-one. If no type is set, add exactly one: `bug` for broken behavior or crashes,
-`new-feature` for a new capability, `enhancement` for an improvement to
-existing behavior.
+one. If no type is set, always add exactly one, including on unclear issues:
+`bug` for broken behavior or crashes, `new-feature` for a new capability,
+`enhancement` for an improvement to existing behavior. Every triaged issue
+ends up with a type label.
 
 **Priority**: if the issue already has a `priority:` label, keep it and do not
 add another; reprioritizing is left to maintainers. Otherwise add exactly one
@@ -127,32 +134,39 @@ package-manager label (`winget`, `scoop`, `chocolatey`, `pip`, `npm`,
 `powershell` for PowerShell 5/7 and PowerShell Gallery, `cargo`,
 `dotnet-tool`, `vcpkg`), `appearance` for UI, theming, or layout,
 `translations` for translated text, or `widgets-for-unigetui` for the Windows
-widgets integration. Add `not-UniGetUI` only when the evidence clearly shows
-the failure comes from the package manager or the package itself.
+widgets integration. Add `possibly-upstream` when the evidence suggests the
+failure comes from the package manager or the package itself, for example the
+same error from the manager's own CLI. Never add `not-UniGetUI`; that verdict
+is left to maintainers.
 
 When unsure about a label, leave it off. A missing label is cheaper than a
 wrong one, and labels can trigger other automation.
 
 ## 4. Identify duplicates
 
-- **Duplicate**: you are highly confident another issue describes the same
-  problem or request. Add `duplicate` and cite that issue. Never decide on title
-  similarity alone.
-- **Related**: same area but a distinct problem. Mention it without adding
-  `duplicate`.
-
-Cite at most three issues.
+Check the search results from step 1 on every issue, including unclear ones; a
+duplicate often answers what an unclear report leaves out. Add `duplicate` only when you are highly confident another issue describes the
+same problem or request, and never decide on title similarity alone. Issues
+that are merely related, in the same area but a distinct problem, are not
+duplicates: do not label or mention them.
 
 ## 5. Add labels and comment
 
-Add all chosen labels in a single `add_labels` call with the issue number.
+Add all chosen labels in a single `add_labels` call with the issue number. If
+there is nothing new to add, skip the call.
 
-Post one comment only when it helps the author or maintainers: the issue is
-unclear, a duplicate, or has closely related issues. Do not comment just to
-announce the labels, and do not repeat questions or duplicate links that an
-earlier comment on the issue already covers. Address the author directly, keep
-it short and friendly,
-and use this shape, omitting sections that do not apply:
+Most issues get labels and no comment. Post a comment only in these two cases:
+
+- the issue is **unclear** and you have specific questions for the author, or
+- the issue is a **duplicate** you are highly confident about.
+
+Never comment for any other reason: not to announce labels, not to mention
+related issues, and not to share a diagnosis, a likely cause, or whether the
+problem comes from UniGetUI. Do not repeat questions or duplicate links that an
+earlier comment on the issue already covers.
+
+Address the author directly, keep it short and friendly, and use this shape,
+omitting the section that does not apply:
 
 ```markdown
 Thanks for the report! A few details would help us look into this:
@@ -161,7 +175,6 @@ Thanks for the report! A few details would help us look into this:
 2. [specific question]
 
 This looks like it may be a duplicate of #[number], which describes [brief reason].
-Related: #[number] ([brief reason]).
 ```
 
 ## Untrusted input
