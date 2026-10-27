@@ -2032,5 +2032,13 @@
   "{0} was not found.": "{0} was not found.",
   "{0} was not found in {1}.": "{0} was not found in {1}.",
   "The package link could not be opened": "The package link could not be opened",
-  "A link to {0} was copied to the clipboard": "A link to {0} was copied to the clipboard"
+  "A link to {0} was copied to the clipboard": "A link to {0} was copied to the clipboard",
+  "Keep UniGetUI running in the background when its window is closed": "Keep UniGetUI running in the background when its window is closed",
+  "Show the UniGetUI icon in the system tray": "Show the UniGetUI icon in the system tray",
+  "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu.": "To reopen UniGetUI, launch it again. To exit, use More > Quit UniGetUI in the navigation menu.",
+  "Notifications are not available on Linux, so you will not be told when updates are found.": "Notifications are not available on Linux, so you will not be told when updates are found.",
+  "UniGetUI stops checking for updates and sending notifications until you open it again.": "UniGetUI stops checking for updates and sending notifications until you open it again.",
+  "UniGetUI is still running": "UniGetUI is still running",
+  "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences.": "UniGetUI keeps running in the background and checking for updates, without a system tray icon. To reopen it, launch UniGetUI again. To exit, use More > Quit UniGetUI in the navigation menu. You can change this in Settings > User interface preferences.",
+  "UniGetUI must keep running in the background when its window is closed for notifications to work": "UniGetUI must keep running in the background when its window is closed for notifications to work"
 }
