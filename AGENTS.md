@@ -111,6 +111,46 @@ retried against a fabricated V2 endpoint. V2-only feeds never enter the V3 path 
 V3 has no `IsLatestVersion`, so the client picks "latest" itself using the comparator described
 in the next section.
 
+## macOS installer packages (.pkg, .dmg and .zip)
+
+`UniGetUI.PackageEngine.Managers.MacPkg` (id `pkg`, macOS only) installs IT-published `.pkg` and
+`.dmg` files through the Software Catalog; the administrator workflow is in `docs/PKG_FEEDS.md`.
+
+- Its sources are not added from the UI: each catalog of the machine-wide `SoftwareCatalog.json`
+  that has a `pkgFeed` declares one, named by the catalog's id and shown by its name
+  (`PkgCatalogFeeds`, `PkgFeedSource`), with `Sources.CanBeEdited` false. The catalog page
+  then lists every package of that feed in the catalog (`SoftwareCatalogViewModel.ExpandPkgFeedsAsync`).
+- A feed is a `file:` folder whose `.pkg` files are read directly, or an `https:` folder read through
+  the `index.json` that `unigetui pkg-index <folder>` writes (`PkgIndexCommand`).
+- Identity comes from the file itself: for a `.pkg`, `XarArchive` + `PkgMetadata` (the first
+  component of a Distribution, else `PackageInfo`, plus its outermost app); for a `.dmg`,
+  `DiskImage` mounts it read-only and reads the app at its root. Installed state comes from
+  `pkgutil` receipts (`PkgReceipts`), else from that app being in place under its bundle id (`AppBundle`).
+- Icons come from the app too: a `.dmg`'s app, or the app's `Info.plist` and `.icns` found in one
+  forward pass through a `.pkg` payload (`PkgPayload`, gzip'd odc cpio). They are converted with
+  `sips` once per file version into the icon cache; the manager sets `SupportsCustomPackageIcons`,
+  without which the base `GetIcon` never asks it.
+- Installs run in-process (`IManagedPackageOperationHelper`): stage a private copy, verify the
+  index hash, the package identity and its Gatekeeper verdict (`spctl --assess`, waived only by a
+  catalog's `allowUnsignedPackages`), then `installer -pkg`, or `ditto` of a `.dmg`'s app into
+  `/Applications`, as root through `osascript ... with administrator privileges`. Every tool is run
+  through `Tool`, which drains both pipes. `ManagerCapabilities.CanUninstall` is false, and the UI
+  refuses uninstalls for such managers; `InstalledPackagesKeepTheirSource` is false (as for
+  Chocolatey), so catalogs sharing a feed all see its installed packages.
+- A `.dmg` may hold one app or one `.pkg` (`WrapsPackage`, recognized by receipt); a `.zip` holds one
+  app, read with `ZipApp` and extracted with `ditto`. `PkgInstaller.PrepareAsync` stages and checks
+  every kind and returns the one root command to run.
+- `unigetui pkg-helper` (`PkgHelperCommand`) is an optional root LaunchDaemon on a Unix socket. A
+  client sends only catalog id, package id and version (`PkgHelperClient`); the helper resolves the
+  feed itself from the catalog, refuses paths standard users could change (`TrustedPath`), then
+  runs the same `PrepareAsync`. Installs fall back to the administrator prompt when it is absent.
+- Behind the prompt, a UniGetUI that standard users cannot replace runs itself as root
+  (`pkg-helper install-item`, `PkgElevatedInstall`), so staging and checks happen where the user's
+  own processes cannot swap the package; only an unprotected build (such as a dev build) checks it
+  before the prompt instead.
+- The Catalog Editor's **Package feed** dialog (`PkgFeedEditor`, `PkgFeedEditorViewModel`) edits
+  `pkgFeed`/`allowUnsignedPackages` and previews a feed through `PkgFeedInspector`.
+
 ## Version comparison across ecosystems
 
 `CoreTools.VersionStringToStruct` treats `-`, `_`, `/` and `#` as plain numeric separators and

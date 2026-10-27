@@ -2,6 +2,9 @@ using System;
 using Avalonia;
 using UniGetUI.Avalonia.Infrastructure;
 using UniGetUI.Core.Data;
+#if !WINDOWS
+using UniGetUI.PackageEngine.Managers.MacPkgManager;
+#endif
 using UniGetUI.Tui;
 
 namespace UniGetUI.Avalonia;
@@ -14,6 +17,15 @@ sealed class Program
     [STAThread]
     public static void Main(string[] args)
     {
+#if !WINDOWS
+        // The root helper runs first, before anything that could log to a folder other users share.
+        if (PkgHelperCommand.IsCommand(args))
+        {
+            Environment.ExitCode = PkgHelperCommand.Run(args[1..], Console.Out, Console.Error);
+            return;
+        }
+#endif
+
         // Both front-ends must wait while the installer replaces their shared files.
         try
         {
@@ -37,6 +49,14 @@ sealed class Program
             Environment.ExitCode = TuiAppHost.Run(args[1..]);
             return;
         }
+
+#if !WINDOWS
+        if (PkgIndexCommand.IsCommand(args))
+        {
+            Environment.ExitCode = PkgIndexCommand.Run(args[1..], Console.Out, Console.Error);
+            return;
+        }
+#endif
 
 #if WINDOWS
         // Stamp the AUMID onto this process before anything else so the shell attributes

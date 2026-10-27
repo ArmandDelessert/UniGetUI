@@ -19,6 +19,9 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         public bool KnowsUpdateDate { get; set; } = false;
         public bool KnowsPackageCount { get; set; } = false;
         public bool MustBeInstalledAsAdmin { get; set; } = false;
+        // False when sources are declared elsewhere (such as .pkg feeds in the software catalog), so
+        // UniGetUI shows no add or remove controls for them.
+        public bool CanBeEdited { get; set; } = true;
 
         public SourceCapabilities() { }
     }
@@ -30,6 +33,11 @@ namespace UniGetUI.PackageEngine.ManagerClasses.Manager
         public bool CanSkipIntegrityChecks = false;
         public bool CanRunInteractively = false;
         public bool CanRemoveDataOnUninstall = false;
+        // False for managers that install but cannot remove, such as macOS .pkg files.
+        public bool CanUninstall = true;
+        // False when the installed inventory cannot tell which source a package came from (Chocolatey
+        // assigns its default source; a macOS .pkg receipt or app records no feed).
+        public bool InstalledPackagesKeepTheirSource = true;
         public bool CanDownloadInstaller = false;
         public bool CanUninstallPreviousVersionsAfterUpdate = false;
         public bool CanListDependencies = false;
