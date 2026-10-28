@@ -6,11 +6,13 @@ using System.Security;
 using System.Text;
 using System.Text.Json;
 using UniGetUI.Core.Tools;
+using UniGetUI.PackageEngine.Managers.InstallerFeeds;
 using UniGetUI.PackageEngine.Managers.MacPkgManager;
 using UniGetUI.PackageEngine.Managers.MacPkgManager.Internal;
 
 namespace UniGetUI.PackageEngine.Tests;
 
+[Collection("Installer feeds")]
 public sealed class MacPkgTests : IDisposable
 {
     private readonly string _directory = Path.Combine(Path.GetTempPath(), nameof(MacPkgTests), Guid.NewGuid().ToString("N"));
@@ -224,12 +226,12 @@ public sealed class MacPkgTests : IDisposable
     [InlineData("relative/folder", false)]
     [InlineData("", false)]
     public void OnlyHttpsFileAndLoopbackLocationsAreFeeds(string text, bool accepted) =>
-        Assert.Equal(accepted, PkgFeed.TryParseLocation(text, out _));
+        Assert.Equal(accepted, FeedLocation.TryParse(text, out _));
 
     [Fact]
     public void AnAbsolutePathIsAFolderFeed()
     {
-        Assert.True(PkgFeed.TryParseLocation(_directory, out Uri location));
+        Assert.True(FeedLocation.TryParse(_directory, out Uri location));
         Assert.True(location.IsFile);
         Assert.Equal(Path.GetFullPath(_directory), location.LocalPath);
     }
@@ -239,7 +241,7 @@ public sealed class MacPkgTests : IDisposable
     [InlineData("https://h/mac", "https://h/mac/index.json")]
     [InlineData("https://h/mac/catalog.json", "https://h/mac/catalog.json")]
     public void TheIndexSitsBesideThePackages(string location, string index) =>
-        Assert.Equal(index, PkgFeed.IndexUrl(new Uri(location)).AbsoluteUri);
+        Assert.Equal(index, FeedLocation.IndexUrl(new Uri(location)).AbsoluteUri);
 
     [Theory]
     [InlineData("Zoom.pkg", "https://h/mac/Zoom.pkg")]
@@ -252,7 +254,7 @@ public sealed class MacPkgTests : IDisposable
     [InlineData("apps\\Zoom.pkg", null)]
     [InlineData("", null)]
     public void IndexPathsCannotLeaveTheFeed(string relative, string? resolved) =>
-        Assert.Equal(resolved, PkgFeed.ResolveWithin(new Uri("https://h/mac/index.json"), relative)?.AbsoluteUri);
+        Assert.Equal(resolved, FeedLocation.ResolveWithin(new Uri("https://h/mac/index.json"), relative)?.AbsoluteUri);
 
     [Fact]
     public void AnIndexSkipsEntriesWithoutAHashOrWithAnEscapingPath()
@@ -398,12 +400,111 @@ public sealed class MacPkgTests : IDisposable
         byte[] json = File.ReadAllBytes(Path.Combine(_directory, "index.json"));
         var items = PkgFeed.ParseIndex(json, new Uri("https://h/feed/index.json"));
         var appItem = items.Single(i => i.Id == "com.example.app.pkg");
-        Assert.Equal(PkgFeed.ComputeSha256(app), appItem.Sha256);
+        Assert.Equal(FeedLocation.ComputeSha256(app), appItem.Sha256);
         Assert.Equal(["arm64"], appItem.Architectures);
         Assert.Equal("https://h/feed/App.png", appItem.Icon?.AbsoluteUri);
         var tool = items.Single(i => i.Id == "com.example.tool.pkg");
         Assert.Equal(("Tool", "2.0", "https://h/feed/tools/Tool%202.pkg"), (tool.Name, tool.Version, tool.Location.AbsoluteUri));
     }
+
+    [Fact]
+    public void AWindowsEntryInAnIndexIsNotAMacPackage()
+    {
+        string sha = new('a', 64);
+        string json = $$"""
+            {
+              "version": 1,
+              "packages": [
+                { "id": "com.example.app.pkg", "name": "App", "version": "1.0", "file": "App.pkg", "sha256": "{{sha}}" },
+                { "id": "Vendor.Tool", "name": "Tool", "version": "1.0", "file": "Tool.exe", "sha256": "{{sha}}", "windows": { "installer": "nsis" } },
+                { "id": "{11111111-2222-3333-4444-555555555555}", "name": "Example", "version": "1.0", "file": "Example.msi", "sha256": "{{sha}}", "windows": { "installer": "msi" } }
+              ]
+            }
+            """;
+        Assert.Equal(["com.example.app.pkg"], PkgFeed.ParseIndex(Encoding.UTF8.GetBytes(json), new Uri("https://h/feed/index.json")).Select(i => i.Id));
+    }
+
+    [Fact]
+    public void TheMacIndexKeepsWindowsEntriesUnderTheirOwnKeySoOlderMacsNeverSeeThem()
+    {
+        string pkg = WritePackage("mac/App.pkg", ProductArchive("com.example.app.pkg", "1.0", "App", "arm64"));
+        string exe = WritePackage("win/Tool.exe", Encoding.ASCII.GetBytes("MZ installer"));
+        WritePackage("win/Changed.msi", [1]);
+        string index = Path.Combine(_directory, "index.json");
+        File.WriteAllText(index, $$"""
+            {
+              "version": 1,
+              "packages": [],
+              "windowsPackages": [
+                { "id": "Vendor.Tool", "name": "Tool", "version": "1.0", "file": "win/Tool.exe", "sha256": "{{FeedLocation.ComputeSha256(exe)}}", "windows": { "installer": "nsis" } },
+                { "id": "Vendor.Changed", "name": "Changed", "version": "1.0", "file": "win/Changed.msi", "sha256": "{{new string('0', 64)}}", "windows": { "installer": "msi" } }
+              ]
+            }
+            """);
+
+        var output = new StringWriter();
+        var error = new StringWriter();
+        Assert.Equal(3, PkgIndexCommand.Run([_directory], output, error));
+        Assert.Contains("win/Tool.exe: Tool (Vendor.Tool 1.0) (kept)", output.ToString());
+        Assert.Contains("win/Changed.msi", error.ToString());
+
+        byte[] json = File.ReadAllBytes(index);
+        var written = FeedJson.Deserialize(json, FeedIndexJsonContext.Default.FeedIndex)!;
+        Assert.Equal(["mac/App.pkg"], written.Packages.Select(e => e.File));
+        Assert.Equal(["win/Tool.exe"], written.WindowsPackages!.Select(e => e.File));
+        Assert.Equal(FeedLocation.ComputeSha256(pkg), PkgFeed.ParseIndex(json, new Uri("https://h/feed/index.json")).Single().Sha256);
+    }
+
+    [Fact]
+    public void AnIndexWithOnlyWindowsPackagesOffersNothingToAMac()
+    {
+        string sha = new('a', 64);
+        string json = $$"""
+            {
+              "version": 1,
+              "packages": [],
+              "windowsPackages": [
+                { "id": "com.example.app.pkg", "name": "App", "version": "1.0", "file": "App.pkg", "sha256": "{{sha}}" }
+              ]
+            }
+            """;
+        Assert.Empty(PkgFeed.ParseIndex(Encoding.UTF8.GetBytes(json), new Uri("https://h/feed/index.json")));
+    }
+
+#if WINDOWS
+    [Fact]
+    public void BothPlatformsIndexAMixedFolderInTurnWithoutLosingTheOthersEntries()
+    {
+        string pkg = WritePackage("mac/App.pkg", ProductArchive("com.example.app.pkg", "1.0", "App", "arm64"));
+        string exe = WritePackage("win/Tool.exe", [.. File.ReadAllBytes(Path.Combine(Environment.SystemDirectory, "cmd.exe")),
+            .. new byte[4], .. BitConverter.GetBytes(0xDEADBEEF), .. Encoding.ASCII.GetBytes("NullsoftInst"), .. new byte[12]]);
+        var indexUrl = new Uri("https://h/feed/index.json");
+        string index = Path.Combine(_directory, "index.json");
+        var windows = new UniGetUI.PackageEngine.Managers.WinInstallerManager.WinInstallerIndexer();
+
+        Assert.Equal(0, FeedIndexCommand.Run([_directory], new StringWriter(), new StringWriter(), windows));
+        Assert.Empty(FeedJson.Deserialize(File.ReadAllBytes(index), FeedIndexJsonContext.Default.FeedIndex)!.Packages);
+        Assert.Empty(PkgFeed.ParseIndex(File.ReadAllBytes(index), indexUrl));
+
+        var output = new StringWriter();
+        Assert.Equal(0, PkgIndexCommand.Run([_directory], output, new StringWriter()));
+        Assert.Contains("win/Tool.exe", output.ToString());
+        Assert.Contains("(kept)", output.ToString());
+        Assert.Equal(FeedLocation.ComputeSha256(pkg), PkgFeed.ParseIndex(File.ReadAllBytes(index), indexUrl).Single().Sha256);
+        var windowsItem = UniGetUI.PackageEngine.Managers.WinInstallerManager.Internal.WinFeed.ParseIndex(File.ReadAllBytes(index), indexUrl).Single();
+        Assert.Equal((FeedLocation.ComputeSha256(exe), "https://h/feed/win/Tool.exe"), (windowsItem.Sha256, windowsItem.Location.AbsoluteUri));
+
+        Assert.Equal(0, FeedIndexCommand.Run([_directory], new StringWriter(), new StringWriter(), windows));
+        Assert.Single(PkgFeed.ParseIndex(File.ReadAllBytes(index), indexUrl));
+        Assert.Single(UniGetUI.PackageEngine.Managers.WinInstallerManager.Internal.WinFeed.ParseIndex(File.ReadAllBytes(index), indexUrl));
+
+        File.AppendAllText(pkg, "changed");
+        var error = new StringWriter();
+        Assert.Equal(3, FeedIndexCommand.Run([_directory], new StringWriter(), error, windows));
+        Assert.Contains("mac/App.pkg", error.ToString());
+        Assert.Empty(PkgFeed.ParseIndex(File.ReadAllBytes(index), indexUrl));
+    }
+#endif
 
     [Fact]
     public void TheIndexCommandExplainsItsUsage()
@@ -433,7 +534,7 @@ public sealed class MacPkgTests : IDisposable
             ]}
             """;
         // Feeds are told apart by catalog id: two catalogs may share a name, not an id.
-        var feeds = PkgCatalogFeeds.Parse(Encoding.UTF8.GetBytes(json));
+        var feeds = CatalogFeeds.Parse(Encoding.UTF8.GetBytes(json));
         Assert.Equal(["a", "c", "d"], feeds.Select(f => f.Id));
         Assert.Equal(["Mac apps", "Local", "Mac apps"], feeds.Select(f => f.Name));
         Assert.Equal("https://software.example.com/mac/", feeds[0].Location.AbsoluteUri);
@@ -444,9 +545,9 @@ public sealed class MacPkgTests : IDisposable
     [Fact]
     public void AMissingOrBrokenCatalogDeclaresNoFeeds()
     {
-        Assert.Empty(PkgCatalogFeeds.Load(Path.Combine(_directory, "missing.json")));
+        Assert.Empty(CatalogFeeds.Load(Path.Combine(_directory, "missing.json")));
         string broken = WritePackage("broken.json", Encoding.UTF8.GetBytes("{ not json"));
-        Assert.Empty(PkgCatalogFeeds.Load(broken));
+        Assert.Empty(CatalogFeeds.Load(broken));
     }
 
     // ── Receipts ───────────────────────────────────────────────────────────
@@ -506,7 +607,7 @@ public sealed class MacPkgTests : IDisposable
     public void AStagedPackageMustMatchTheFeedHashAndIdentity()
     {
         string staged = WritePackage("staged.pkg", ProductArchive("com.example.app.pkg", "1.0"));
-        string hash = PkgFeed.ComputeSha256(staged);
+        string hash = FeedLocation.ComputeSha256(staged);
         var item = new PkgFeedItem("com.example.app.pkg", "App", "1.0", new Uri("https://h/App.pkg"), hash, 0, [], null);
 
         PkgInstaller.VerifyHash(item, staged);
@@ -674,7 +775,7 @@ public sealed class MacPkgTests : IDisposable
     [Fact]
     public void ACatalogCanAllowItsFeedsUnsignedPackages()
     {
-        var feeds = PkgCatalogFeeds.Parse(Encoding.UTF8.GetBytes("""
+        var feeds = CatalogFeeds.Parse(Encoding.UTF8.GetBytes("""
             {"version":1,"catalogs":[
               {"id":"signed","name":"Signed","packages":[],"pkgFeed":"https://h/a/"},
               {"id":"internal","name":"Internal","packages":[],"pkgFeed":"https://h/b/","allowUnsignedPackages":true}
@@ -885,7 +986,7 @@ public sealed class MacPkgTests : IDisposable
             ["--pkg-info", "com.example.current.pkg"] => (0, "version: 5.0\n"),
             _ => (1, ""),
         };
-        PkgCatalogFeeds.TestCatalogPathOverride = catalog;
+        CatalogFeeds.TestCatalogPathOverride = catalog;
         try
         {
             var manager = new MacPkg();
@@ -917,7 +1018,7 @@ public sealed class MacPkgTests : IDisposable
         finally
         {
             PkgReceipts.RunPkgUtil = previousPkgUtil;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
         }
     }
 
@@ -941,7 +1042,7 @@ public sealed class MacPkgTests : IDisposable
             ["--pkg-info", "com.example.app.pkg"] => (0, "version: 1.0\n"),
             _ => (1, ""),
         };
-        PkgCatalogFeeds.TestCatalogPathOverride = catalog;
+        CatalogFeeds.TestCatalogPathOverride = catalog;
         try
         {
             var manager = new MacPkg();
@@ -956,7 +1057,7 @@ public sealed class MacPkgTests : IDisposable
         finally
         {
             PkgReceipts.RunPkgUtil = previousPkgUtil;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
         }
     }
 
@@ -968,7 +1069,7 @@ public sealed class MacPkgTests : IDisposable
             + string.Join(',', ids.Select(id => $$"""{"id":"{{id}}","name":"{{id}}","packages":[],"pkgFeed":"https://example.com/{{id}}/"}"""))
             + "]}");
         Declare("a");
-        PkgCatalogFeeds.TestCatalogPathOverride = catalog;
+        CatalogFeeds.TestCatalogPathOverride = catalog;
         try
         {
             var manager = new MacPkg();
@@ -977,7 +1078,7 @@ public sealed class MacPkgTests : IDisposable
             manager.RefreshPackageIndexes();
             Assert.Equal(["a", "b"], manager.SourcesHelper.GetSources().Select(s => s.Name));
         }
-        finally { PkgCatalogFeeds.TestCatalogPathOverride = null; }
+        finally { CatalogFeeds.TestCatalogPathOverride = null; }
     }
 
     // ── Apps ───────────────────────────────────────────────────────────────
@@ -1112,7 +1213,7 @@ public sealed class MacPkgTests : IDisposable
 
         var previousPkgUtil = PkgReceipts.RunPkgUtil;
         PkgReceipts.RunPkgUtil = (_, args) => args is ["--pkgs"] ? (0, "com.jamf.appinstallers.GitKraken\n") : (1, "");
-        PkgCatalogFeeds.TestCatalogPathOverride = catalog;
+        CatalogFeeds.TestCatalogPathOverride = catalog;
         AppBundle.TestRootOverride = root;
         try
         {
@@ -1127,7 +1228,7 @@ public sealed class MacPkgTests : IDisposable
         finally
         {
             PkgReceipts.RunPkgUtil = previousPkgUtil;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
             AppBundle.TestRootOverride = null;
         }
     }
@@ -1150,7 +1251,7 @@ public sealed class MacPkgTests : IDisposable
 
         var previousPkgUtil = PkgReceipts.RunPkgUtil;
         PkgReceipts.RunPkgUtil = (_, _) => (1, "");
-        PkgCatalogFeeds.TestCatalogPathOverride = catalog;
+        CatalogFeeds.TestCatalogPathOverride = catalog;
         AppBundle.TestRootOverride = root;
         try
         {
@@ -1160,7 +1261,7 @@ public sealed class MacPkgTests : IDisposable
         finally
         {
             PkgReceipts.RunPkgUtil = previousPkgUtil;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
             AppBundle.TestRootOverride = null;
         }
     }
@@ -1540,6 +1641,16 @@ public sealed class MacPkgTests : IDisposable
     }
 
     [Fact]
+    public void AFeedPackageHasNoStandaloneCommandLine()
+    {
+        var manager = new MacPkg();
+        var source = new Classes.Manager.ManagerSource(manager, "mac", new Uri("https://h/"));
+        var package = new PackageClasses.Package("App", "com.example.app.pkg", "1.0", source, manager);
+        Assert.Throws<InvalidOperationException>(() =>
+            manager.OperationHelper.GetStandaloneParameters(package, new Serializable.InstallOptions(), Enums.OperationType.Install));
+    }
+
+    [Fact]
     public void AnUpdateWithoutANewerVersionInstallsTheNewestPublished()
     {
         var manager = new MacPkg();
@@ -1575,7 +1686,7 @@ public sealed class MacPkgTests : IDisposable
         string socket = Path.Combine("/tmp", $"ugpkg-{Guid.NewGuid():N}"[..20] + ".sock");
         var previous = (PkgInstaller.RunProcess, PkgInstaller.IsRoot, PkgHelperClient.SocketPath);
         var commands = new List<string>();
-        PkgCatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
+        CatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
         TrustedPath.TestOverride = _ => null;
         PkgHelperClient.SocketPath = socket;
         PkgInstaller.IsRoot = () => false;
@@ -1602,7 +1713,7 @@ public sealed class MacPkgTests : IDisposable
             stop.Cancel();
             await server;
             (PkgInstaller.RunProcess, PkgInstaller.IsRoot, PkgHelperClient.SocketPath) = previous;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
             TrustedPath.TestOverride = null;
         }
         Assert.False(File.Exists(socket));
@@ -1613,7 +1724,7 @@ public sealed class MacPkgTests : IDisposable
     {
         string feed = Path.Combine(_directory, "feed");
         WritePackage("feed/App.pkg", ProductArchive("com.example.app.pkg", "1.0", "App"));
-        PkgCatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
+        CatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
         var previous = PkgInstaller.RunProcess;
         bool ran = false;
         PkgInstaller.RunProcess = (_, _, _) => { ran = true; return Task.FromResult((0, "")); };
@@ -1640,7 +1751,7 @@ public sealed class MacPkgTests : IDisposable
 
             // A loopback port is free for any user to take, so a web feed must be https for the helper.
             ran = false;
-            PkgCatalogFeeds.TestCatalogPathOverride = WritePackage("http-catalog.json", Encoding.UTF8.GetBytes("""
+            CatalogFeeds.TestCatalogPathOverride = WritePackage("http-catalog.json", Encoding.UTF8.GetBytes("""
                 {"version":1,"catalogs":[{"id":"web","name":"Web","packages":[],"pkgFeed":"http://127.0.0.1:9/","allowUnsignedPackages":true}]}
                 """));
             var refusal = await PkgHelperCommand.InstallAsync(new PkgHelperRequest { Catalog = "web", Id = "com.example.app.pkg" }, _ => { });
@@ -1651,7 +1762,7 @@ public sealed class MacPkgTests : IDisposable
         finally
         {
             PkgInstaller.RunProcess = previous;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
             TrustedPath.TestOverride = null;
         }
     }
@@ -1665,7 +1776,7 @@ public sealed class MacPkgTests : IDisposable
         // Requests are deserialized by the source generator, which leaves absent values null.
         string feed = Path.Combine(_directory, "feed");
         WritePackage("feed/App.pkg", ProductArchive("com.example.app.pkg", "1.0", "App"));
-        PkgCatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
+        CatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
         TrustedPath.TestOverride = _ => null;
         var previous = PkgInstaller.RunProcess;
         PkgInstaller.RunProcess = (_, _, _) => Task.FromResult((0, "accepted"));
@@ -1677,7 +1788,7 @@ public sealed class MacPkgTests : IDisposable
         finally
         {
             PkgInstaller.RunProcess = previous;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
             TrustedPath.TestOverride = null;
         }
     }
@@ -1726,7 +1837,7 @@ public sealed class MacPkgTests : IDisposable
         string socket = Path.Combine("/tmp", $"ugpkg-{Guid.NewGuid():N}"[..20] + ".sock");
         var previous = (PkgInstaller.RunProcess, PkgInstaller.IsRoot, PkgHelperClient.SocketPath);
         var ran = new List<string>();
-        PkgCatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
+        CatalogFeeds.TestCatalogPathOverride = HelperCatalog(feed);
         TrustedPath.TestOverride = path => path == feed ? "any user can change it." : null;
         PkgHelperClient.SocketPath = socket;
         PkgInstaller.IsRoot = () => false;
@@ -1751,7 +1862,7 @@ public sealed class MacPkgTests : IDisposable
             stop.Cancel();
             await server;
             (PkgInstaller.RunProcess, PkgInstaller.IsRoot, PkgHelperClient.SocketPath) = previous;
-            PkgCatalogFeeds.TestCatalogPathOverride = null;
+            CatalogFeeds.TestCatalogPathOverride = null;
             TrustedPath.TestOverride = null;
         }
     }

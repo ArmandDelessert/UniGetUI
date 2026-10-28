@@ -2,7 +2,11 @@ using System;
 using Avalonia;
 using UniGetUI.Avalonia.Infrastructure;
 using UniGetUI.Core.Data;
-#if !WINDOWS
+#if WINDOWS
+using UniGetUI.Interface;
+using UniGetUI.PackageEngine.Managers.InstallerFeeds;
+using UniGetUI.PackageEngine.Managers.WinInstallerManager;
+#else
 using UniGetUI.PackageEngine.Managers.MacPkgManager;
 #endif
 using UniGetUI.Tui;
@@ -50,7 +54,14 @@ sealed class Program
             return;
         }
 
-#if !WINDOWS
+#if WINDOWS
+        if (FeedIndexCommand.IsCommand(args))
+        {
+            WindowsConsoleHost.PrepareCliIO();
+            Environment.ExitCode = FeedIndexCommand.Run(args[1..], Console.Out, Console.Error, new WinInstallerIndexer());
+            return;
+        }
+#else
         if (PkgIndexCommand.IsCommand(args))
         {
             Environment.ExitCode = PkgIndexCommand.Run(args[1..], Console.Out, Console.Error);
