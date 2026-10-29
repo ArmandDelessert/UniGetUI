@@ -71,6 +71,9 @@ public abstract partial class AbstractPackagesPage : UserControl,
         OrderByNewVersion_Menu.IsVisible = ViewModel.RoleIsUpdateLike;
         OrderByDownloadSize_Menu.IsVisible = ViewModel.DownloadSizeColumnVisible;
         OrderByReleaseDate_Menu.IsVisible = ViewModel.ReleaseDateColumnVisible;
+        PopulateColumnsSubmenu();
+        if (OrderByButton.Flyout is MenuFlyout orderByFlyout)
+            orderByFlyout.Opening += (_, _) => PopulateColumnsSubmenu();
 
         // Stamp initial checkmarks, then keep them in sync with sort-property changes
         UpdateSortMenuChecks();
@@ -82,6 +85,14 @@ public abstract partial class AbstractPackagesPage : UserControl,
                 UpdateSortMenuChecks();
                 SyncOrderByButtonName();
             }
+            if (args.PropertyName is nameof(PackagesPageViewModel.DownloadSizeColumnVisible))
+                OrderByDownloadSize_Menu.IsVisible = ViewModel.DownloadSizeColumnVisible;
+            if (args.PropertyName is nameof(PackagesPageViewModel.ReleaseDateColumnVisible))
+                OrderByReleaseDate_Menu.IsVisible = ViewModel.ReleaseDateColumnVisible;
+            if (args.PropertyName is nameof(PackagesPageViewModel.InstallerHostColumnVisible)
+                                  or nameof(PackagesPageViewModel.DownloadSizeColumnVisible)
+                                  or nameof(PackagesPageViewModel.ReleaseDateColumnVisible))
+                LoadRealizedRowValues();
             if (args.PropertyName is nameof(PackagesPageViewModel.IsFilterPaneOpen))
             {
                 SyncFiltersButtonName();
@@ -193,6 +204,8 @@ public abstract partial class AbstractPackagesPage : UserControl,
 
         // Overlay backdrop dismisses the filter pane when tapped.
         FilterOverlayBackdrop.PointerPressed += (_, _) => ViewModel.IsFilterPaneOpen = false;
+
+        PackageList.AddHandler(ContextRequestedEvent, PackageList_ContextRequested, RoutingStrategies.Tunnel);
 
         // Wire context menu (built by subclass)
         _contextMenu = GenerateContextMenu();
@@ -599,6 +612,72 @@ public abstract partial class AbstractPackagesPage : UserControl,
             else
                 _ = ShowDetailsForPackage(pkg);
             e.Handled = true;
+        }
+    }
+
+    private void PackageList_ContextRequested(object? sender, ContextRequestedEventArgs e)
+    {
+        if (e.Source is not Visual source
+            || (source is not DataGridColumnHeader && source.FindAncestorOfType<DataGridColumnHeader>() is null))
+            return;
+
+        e.Handled = true;
+        var menu = new ContextMenu();
+        foreach (Control item in BuildColumnMenuItems()) menu.Items.Add(item);
+        menu.Open(PackageList);
+    }
+
+    private void PopulateColumnsSubmenu()
+    {
+        Columns_Menu.Items.Clear();
+        foreach (Control item in BuildColumnMenuItems()) Columns_Menu.Items.Add(item);
+    }
+
+    private List<Control> BuildColumnMenuItems()
+    {
+        var vm = ViewModel;
+        var items = new List<Control>
+        {
+            ColumnMenuItem(CoreTools.Translate("Package Name"), PackagesPageViewModel.NameColumn, vm.NameColumnVisible),
+            ColumnMenuItem(CoreTools.Translate("Package ID"), PackagesPageViewModel.IdColumn, vm.IdColumnVisible),
+            ColumnMenuItem(CoreTools.Translate("Version"), PackagesPageViewModel.VersionColumn, vm.VersionColumnVisible),
+        };
+        if (vm.RoleIsUpdateLike)
+            items.Add(ColumnMenuItem(CoreTools.Translate("New version"), PackagesPageViewModel.NewVersionColumn, vm.NewVersionHeaderVisible));
+        items.Add(ColumnMenuItem(CoreTools.Translate("Source"), PackagesPageViewModel.SourceColumn, vm.SourceColumnVisible));
+        if (vm.OptionalColumnsAvailable)
+        {
+            items.Add(new Separator());
+            items.Add(ColumnMenuItem(CoreTools.Translate("Installer host"), PackagesPageViewModel.InstallerHostColumn, vm.InstallerHostColumnVisible));
+            items.Add(ColumnMenuItem(CoreTools.Translate("Download size"), PackagesPageViewModel.DownloadSizeColumn, vm.DownloadSizeColumnVisible));
+            items.Add(ColumnMenuItem(CoreTools.Translate("Release date"), PackagesPageViewModel.ReleaseDateColumn, vm.ReleaseDateColumnVisible));
+        }
+
+        var shown = items.OfType<MenuItem>().Where(item => item.IsChecked).ToList();
+        if (shown.Count == 1) shown[0].IsEnabled = false;
+        return items;
+    }
+
+    private static MenuItem ColumnMenuItem(string label, string column, bool isChecked)
+    {
+        var item = new MenuItem
+        {
+            Header = label,
+            ToggleType = MenuItemToggleType.CheckBox,
+            IsChecked = isChecked,
+        };
+        item.Click += (_, _) => PackagesPageViewModel.SetColumnVisible(column, !isChecked);
+        return item;
+    }
+
+    private void LoadRealizedRowValues()
+    {
+        foreach (DataGridRow row in PackageList.GetVisualDescendants().OfType<DataGridRow>())
+        {
+            if (row.DataContext is not PackageWrapper wrapper) continue;
+            wrapper.EnsureInstallerHostLoaded();
+            wrapper.EnsureDownloadSizeLoaded();
+            wrapper.EnsureReleaseDateLoaded();
         }
     }
 
