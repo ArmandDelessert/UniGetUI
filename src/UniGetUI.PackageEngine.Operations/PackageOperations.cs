@@ -84,6 +84,7 @@ namespace UniGetUI.PackageEngine.Operations
         public readonly InstallOptions Options;
         public readonly OperationType Role;
         public bool FailedBecauseApplicationRunning { get; private set; }
+        public Task SuccessHandled { get; private set; } = Task.CompletedTask;
         private IReadOnlyList<string> _closeRunningAppProcessNames = [];
         private readonly List<string> _brokerKillBeforeOperationAdded = [];
 
@@ -141,7 +142,7 @@ namespace UniGetUI.PackageEngine.Operations
             };
             OperationSucceeded += (_, _) => Package.Manager.InvalidateInstalledPackages();
             OperationSucceeded += (_, _) => RecordPendingRebootState();
-            OperationSucceeded += (_, _) => HandleSuccess();
+            OperationSucceeded += (_, _) => SuccessHandled = HandleSuccess();
             OperationFailed += (_, _) => HandleFailure();
         }
 
@@ -1650,6 +1651,8 @@ namespace UniGetUI.PackageEngine.Operations
         )
             : base(package, options, OperationType.Update, IgnoreParallelInstalls, req) { }
 
+        public bool KeepUpdatesPaused { get; init; }
+
         protected override Task HandleFailure()
         {
             Package.SetTag(PackageTag.Failed);
@@ -1667,6 +1670,16 @@ namespace UniGetUI.PackageEngine.Operations
             UpgradablePackagesLoader.Instance.Remove(Package);
             InstalledPackagesLoader.Instance.Remove(Package);
 
+            bool explicitVersionRequested =
+                !string.IsNullOrWhiteSpace(Options.Version)
+                && Package.Manager.Capabilities.SupportsCustomVersionsOnUpdate;
+            string targetVersion = explicitVersionRequested
+                ? Options.Version
+                : string.IsNullOrWhiteSpace(Package.NewVersionString)
+                    ? Package.VersionString
+                    : Package.NewVersionString;
+            IgnoredUpdatesDatabase.ForgetAvailableUpdate(Package, targetVersion);
+
             if (Settings.Get(Settings.K.AskToDeleteNewDesktopShortcuts))
             {
                 DesktopShortcutsDatabase.HandleNewShortcuts(DesktopShortcutsBeforeStart);
@@ -1680,21 +1693,15 @@ namespace UniGetUI.PackageEngine.Operations
                 );
             }
 
-            bool explicitVersionRequested =
-                !string.IsNullOrWhiteSpace(Options.Version)
-                && Package.Manager.Capabilities.SupportsCustomVersionsOnUpdate;
             var installedPackage = await ResolveInstalledPackageSnapshotAsync(
-                explicitVersionRequested
-                    ? Options.Version
-                    : string.IsNullOrWhiteSpace(Package.NewVersionString)
-                        ? Package.VersionString
-                        : Package.NewVersionString,
+                targetVersion,
                 preferFallbackVersionWhenMissing: explicitVersionRequested
             );
             await InstalledPackagesLoader.Instance.AddForeign(installedPackage);
 
             if (
-                await Package.HasUpdatesIgnoredAsync()
+                !KeepUpdatesPaused
+                && await Package.HasUpdatesIgnoredAsync()
                 && await Package.GetIgnoredUpdatesVersionAsync() != "*"
             )
                 await Package.RemoveFromIgnoredUpdatesAsync();
